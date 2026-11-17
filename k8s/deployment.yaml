@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poc-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: poc-app
+  template:
+    metadata:
+      labels:
+        app: poc-app
+    spec:
+      containers:
+      - name: poc-app
+        image: IMAGE_PLACEHOLDER
+        ports:
+        - containerPort: 8080
