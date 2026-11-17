@@ -1,0 +1,56 @@
+name: Deploy to GKE
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  # --- CHANGE THESE 4 TO MATCH YOUR GCP SETUP ---
+  REGION: 'us-central1'
+  CLUSTER_NAME: 'sandeep-poc' 
+  GAR_REPO: 'app-repo' 
+  IMAGE_NAME: 'poc-app'
+  
+  # --- THESE ARE ALREADY FILLED OUT ---
+  PROJECT_ID: 'sandeepproject-509608'
+  WIF_PROVIDER: 'projects/619305970711/locations/global/workloadIdentityPools/github-actions-wip/providers/github-provider'
+  WIF_SA: 'sandeep-sa@sandeepproject-509608.iam.gserviceaccount.com'
+
+permissions:
+  contents: read
+  id-token: write 
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted # Targets your Compute Engine VM
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ env.WIF_PROVIDER }}
+        service_account: ${{ env.WIF_SA }}
+
+    - name: Configure Docker Auth
+      run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev -q
+
+    - name: Build and Push Docker Image
+      run: |
+        IMAGE_TAG=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        docker build -t $IMAGE_TAG .
+        docker push $IMAGE_TAG
+
+    - name: Get GKE Credentials
+      uses: google-github-actions/get-gke-credentials@v2
+      with:
+        cluster_name: ${{ env.CLUSTER_NAME }}
+        location: ${{ env.REGION }}
+
+    - name: Deploy to GKE
+      run: |
+        IMAGE_TAG=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        sed -i "s|IMAGE_PLACEHOLDER|$IMAGE_TAG|g" k8s/deployment.yaml
+        kubectl apply -f k8s/deployment.yaml
+        kubectl rollout status deployment/poc-app --timeout=120s
