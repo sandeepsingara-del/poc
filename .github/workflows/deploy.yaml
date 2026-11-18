@@ -1,56 +1,68 @@
-name: Deploy to GKE
+name: Build and Deploy to GKE
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
 
 env:
-  # --- CHANGE THESE 4 TO MATCH YOUR GCP SETUP ---
-  REGION: 'us-central1'
-  CLUSTER_NAME: 'sandeep-poc' 
-  GAR_REPO: 'app-repo' 
-  IMAGE_NAME: 'poc-app'
-  
-  # --- THESE ARE ALREADY FILLED OUT ---
   PROJECT_ID: 'sandeepproject-509608'
-  WIF_PROVIDER: 'projects/619305970711/locations/global/workloadIdentityPools/github-actions-wip/providers/github-provider'
+  CLUSTER: 'sandeep-cluster'
+  CLUSTER_ZONE: 'us-central1'
+  REPOSITORY: 'app-repo'
+  REPOSITORY_REGION: 'us-central1'
+  IMAGE: 'poc-app'
+  
+  # Workload Identity Federation
+  WIF_PROVIDER: 'projects/619305970711/locations/global/workloadIdentityPools/sandeep-wip/providers/github-provider'
   WIF_SA: 'sandeep-sa@sandeepproject-509608.iam.gserviceaccount.com'
-
-permissions:
-  contents: read
-  id-token: write 
 
 jobs:
   build-and-deploy:
-    runs-on: self-hosted # Targets your Compute Engine VM
+    runs-on: self-hosted
+    permissions:
+      id-token: write
+      contents: read
+
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
+    # 1. Authenticate to Google Cloud using Workload Identity Federation
+    - id: 'auth'
+      name: 'Obtain access token by using workload identity federation'
+      uses: 'google-github-actions/auth@v2'
       with:
         workload_identity_provider: ${{ env.WIF_PROVIDER }}
         service_account: ${{ env.WIF_SA }}
 
-    - name: Configure Docker Auth
-      run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev -q
+    # 2. Configure Docker to push to your Artifact Registry
+    - name: Connect to Artifact Registry
+      run: gcloud auth configure-docker ${{ env.REPOSITORY_REGION }}-docker.pkg.dev -q
 
-    - name: Build and Push Docker Image
-      run: |
-        IMAGE_TAG=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-        docker build -t $IMAGE_TAG .
-        docker push $IMAGE_TAG
-
-    - name: Get GKE Credentials
+    # 3. Download the GKE connection credentials to the runner VM
+    - name: Connect to GKE
       uses: google-github-actions/get-gke-credentials@v2
       with:
-        cluster_name: ${{ env.CLUSTER_NAME }}
-        location: ${{ env.REGION }}
+        cluster_name: ${{ env.CLUSTER }}
+        location: ${{ env.CLUSTER_ZONE }}
 
+    # 4. Build and Push the container image
+    - name: Create image tag
+      run: echo "IMAGE_TAG=${{ env.REPOSITORY_REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE }}:$GITHUB_SHA" >> $GITHUB_ENV
+
+    - name: Lock image version in deployment.yaml
+      run: sed -i "s|IMAGE_PLACEHOLDER|${{ env.IMAGE_TAG }}|g" k8s/deployment.yaml
+
+    - name: Build Docker image
+      run: docker build --tag "${{ env.IMAGE_TAG }}" .
+
+    - name: Publish Docker image to Google Artifact Registry
+      run: docker push "${{ env.IMAGE_TAG }}"
+
+    # 5. Apply the separated manifests to the Autopilot cluster
     - name: Deploy to GKE
       run: |
-        IMAGE_TAG=${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-        sed -i "s|IMAGE_PLACEHOLDER|$IMAGE_TAG|g" k8s/deployment.yaml
         kubectl apply -f k8s/deployment.yaml
+        kubectl apply -f k8s/service.yaml
         kubectl rollout status deployment/poc-app --timeout=120s
